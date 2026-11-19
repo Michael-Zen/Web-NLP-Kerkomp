@@ -35,7 +35,7 @@ const state = {
 let requestSeq = 0;
 
 const els = {
-  back: document.getElementById('back-link'),
+  breadcrumb: document.getElementById('breadcrumb'),
   info: document.getElementById('product-info'),
   note: document.getElementById('qa-note'),
   form: document.getElementById('qa-form'),
@@ -55,10 +55,8 @@ const els = {
 function init() {
   initLayout('search', 'Tanya Produk');
 
-  els.back.innerHTML = `${icon('arrowLeft', { size: 18 })}<span>Kembali ke hasil pencarian</span>`;
   els.note.innerHTML = `${icon('info', { size: 16 })}<span>Pertanyaan dalam bahasa Inggris. Jawaban diambil dari ulasan konsumen, bukan saran medis.</span>`;
   els.historyTitle.innerHTML = `${icon('history', { size: 18 })}<span>Riwayat pertanyaan</span>`;
-  els.historyClear.innerHTML = icon('trash', { size: 16 });
   setSubmitLabel(false);
   updateAdvancedSummary();
 
@@ -91,32 +89,33 @@ async function loadProduct() {
 function renderProduct(p) {
   document.title = `${p.name} · ${APP_NAME}`;
   els.info.setAttribute('aria-busy', 'false');
+  els.breadcrumb.innerHTML = `
+    <a href="index.html">Beranda</a><span class="breadcrumb__sep" aria-hidden="true">/</span>
+    <a href="index.html?cat=${encodeURIComponent(p.category)}">${escapeHtml(p.category)}</a><span class="breadcrumb__sep" aria-hidden="true">/</span>
+    <span aria-current="page">${escapeHtml(p.name)}</span>`;
   els.info.innerHTML = `
     ${productThumb(p, { size: 'lg' })}
     <div class="product-info__body">
-      <div class="product-info__meta">
-        ${categoryTag(p.category)}
-        <a class="fab fab--tertiary fab--sm" href="index.html?cat=${encodeURIComponent(p.category)}"
-           aria-label="Lihat produk lain di kategori ${escapeHtml(p.category)}" title="Produk lain di kategori ini">
-          ${icon('tag', { size: 16 })}
-        </a>
-      </div>
+      <div>${categoryTag(p.category)}</div>
       <h1 class="product-info__name">${escapeHtml(p.name)}</h1>
       <p class="product-info__brand">${escapeHtml(p.brand)}</p>
       <p class="product-info__price">${formatRupiah(p.price)}</p>
       <p class="product-info__desc">${escapeHtml(p.description)}</p>
-      <dl class="facts">
-        <div><dt>Ukuran</dt><dd>${escapeHtml(p.size || '—')}</dd></div>
-        <div><dt>Jenis kulit</dt><dd>${escapeHtml((p.skin_types || []).slice(0, 2).join(', ') || '—')}</dd></div>
-        <div><dt>Ulasan tersedia</dt><dd>${p.review_count} ulasan</dd></div>
-      </dl>
+      <table class="spec-table">
+        <caption class="visually-hidden">Spesifikasi produk</caption>
+        <tbody>
+          <tr><th scope="row">Merek</th><td>${escapeHtml(p.brand || '—')}</td></tr>
+          <tr><th scope="row">Ukuran</th><td>${escapeHtml(p.size || '—')}</td></tr>
+          <tr><th scope="row">Jenis kulit</th><td>${escapeHtml((p.skin_types || []).join(', ') || '—')}</td></tr>
+          <tr><th scope="row">Ulasan tersedia</th><td>${p.review_count ?? 0} ulasan</td></tr>
+        </tbody>
+      </table>
     </div>`;
 }
 
 function renderProductError(message) {
   els.info.setAttribute('aria-busy', 'false');
   els.info.innerHTML = stateBlock({
-    iconName: 'alert',
     tone: 'danger',
     compact: true,
     title: 'Produk tidak dapat dimuat',
@@ -311,7 +310,7 @@ function renderAnswer(data, params) {
     els.result.innerHTML = `
       <article class="answer-card" aria-label="Jawaban">
         <div class="answer-card__head">
-          <span class="eyebrow answer-card__label">${icon('sparkles', { size: 14 })}Jawaban</span>
+          <span class="eyebrow answer-card__label">Jawaban</span>
           ${meta}
         </div>
         <p class="answer-card__text" lang="en">“${escapeHtml(data.answer)}”</p>
@@ -326,7 +325,7 @@ function renderAnswer(data, params) {
   els.result.innerHTML = `
     <article class="answer-card answer-card--empty" aria-label="Jawaban tidak ditemukan">
       <div class="answer-card__head">
-        <span class="eyebrow" style="color:var(--color-text-secondary-strong)">Hasil</span>
+        <span class="eyebrow">Hasil</span>
         ${meta}
       </div>
       <div class="no-answer">

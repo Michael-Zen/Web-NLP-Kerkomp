@@ -8,7 +8,7 @@
   <meta name="description" content="Detail produk skincare dan tanya-jawab berbasis ulasan konsumen.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Playfair+Display:ital,wght@0,500;0,600;0,700;1,500;1,600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Playfair+Display:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="css/tokens.css">
   <link rel="stylesheet" href="css/style.css">
 </head>
@@ -18,12 +18,14 @@
   <header id="site-header" class="site-header"></header>
 
   <main id="main" class="container">
-    <a class="back-link" id="back-link" href="index.html"></a>
+    <nav class="breadcrumb" id="breadcrumb" aria-label="Breadcrumb">
+      <a href="index.html">Beranda</a>
+    </nav>
 
     <div class="product-layout">
       <!-- ===== Kolom kiri: info produk ===== -->
-      <article class="card product-info" id="product-info" aria-busy="true" aria-live="polite">
-        <span class="skeleton skeleton--thumb" style="height:300px;border-radius:16px"></span>
+      <article class="product-info" id="product-info" aria-busy="true" aria-live="polite">
+        <span class="skeleton skeleton--thumb skeleton--thumb-lg"></span>
         <div class="product-info__body">
           <span class="skeleton skeleton--line skeleton--w40"></span>
           <span class="skeleton skeleton--title"></span>
@@ -35,7 +37,7 @@
       <!-- ===== Kolom kanan: Tanya produk (QA) ===== -->
       <section class="card qa-panel" aria-labelledby="qa-title">
         <div>
-          <span class="eyebrow">Question Answering · Ulasan</span>
+          <p class="eyebrow">Tanya jawab dari ulasan</p>
           <h2 class="qa-title" id="qa-title">Tanya tentang produk ini</h2>
           <p class="qa-note" id="qa-note"></p>
         </div>
@@ -96,7 +98,7 @@
         <section aria-labelledby="history-title">
           <div class="history-head">
             <h3 class="history-title" id="history-title"></h3>
-            <button type="button" class="fab fab--danger fab--sm" id="history-clear" aria-label="Hapus riwayat pertanyaan" title="Hapus riwayat" disabled></button>
+            <button type="button" class="link-btn link-btn--danger" id="history-clear" aria-label="Hapus riwayat pertanyaan" disabled>hapus semua</button>
           </div>
           <div id="history"></div>
         </section>

@@ -1,8 +1,9 @@
 /**
  * search.js
- * Logika halaman Beranda + Semantic Search:
- * state pencarian, panel kontrol, mode bandingkan, dan semua state UI
- * (kosong, loading, tidak ada hasil, error).
+ * Logika halaman Beranda + Pencarian:
+ * state pencarian, sidebar filter (metode, kategori, skor minimum, jumlah hasil),
+ * urutan hasil, mode bandingkan, drawer filter di tablet,
+ * dan semua state UI (kosong, loading, tidak ada hasil, error).
  */
 import { api } from './api.js';
 import {
@@ -17,7 +18,8 @@ const EXAMPLE_QUERIES = [
   'pelembap ringan untuk cuaca panas',
 ];
 
-const MODE_LABEL = { semantic: 'Semantic', bm25: 'Keyword (BM25)' };
+const MODE_LABEL = { semantic: 'Semantik', bm25: 'Kata kunci (BM25)' };
+const SORTS = ['relevance', 'price-asc', 'price-desc'];
 const MIN_AUTO_SEARCH_CHARS = 3;
 
 // State halaman (sumber kebenaran tunggal)
@@ -27,41 +29,52 @@ const state = {
   topK: 10,
   category: 'Semua',
   compare: false,
+  minScore: 0,
+  sort: 'relevance',
 };
 
 // Penanda request terbaru, supaya respons lama yang datang terlambat diabaikan
 let requestSeq = 0;
+// Respons terakhir, supaya ganti urutan / skor minimum tidak perlu request ulang
+let lastView = null;
+// Jumlah produk per kategori (diisi dari katalog)
+let categoryCounts = null;
 
 const els = {
   form: document.getElementById('search-form'),
   input: document.getElementById('search-input'),
   clearBtn: document.getElementById('search-clear'),
-  exampleBtn: document.getElementById('btn-example'),
   exampleChips: document.getElementById('example-chips'),
   modeGroup: document.getElementById('mode-group'),
+  compare: document.getElementById('compare-toggle'),
+  categoryList: document.getElementById('category-list'),
+  minScore: document.getElementById('min-score'),
+  minScoreValue: document.getElementById('min-score-value'),
   topK: document.getElementById('topk-select'),
-  compareBtn: document.getElementById('compare-toggle'),
-  categoryChips: document.getElementById('category-chips'),
-  resetCategoryBtn: document.getElementById('btn-reset-category'),
+  resetBtn: document.getElementById('btn-reset-filters'),
+  sort: document.getElementById('sort-select'),
+  filters: document.getElementById('filters'),
+  filtersOpen: document.getElementById('filters-open'),
+  filtersClose: document.getElementById('filters-close'),
+  backdrop: document.getElementById('filters-backdrop'),
   info: document.getElementById('results-info'),
   results: document.getElementById('results'),
 };
 
 /* ---------- Inisialisasi ---------- */
 function init() {
-  initLayout(location.hash === '#cari' ? 'search' : 'home', 'Semantic Search');
+  initLayout(location.hash === '#cari' ? 'search' : 'home', 'Pencarian Produk Semantik');
 
-  // Ikon pada tombol statis
   els.clearBtn.innerHTML = icon('x', { size: 18 });
-  els.exampleBtn.innerHTML = icon('wand', { size: 20 });
-  els.resetCategoryBtn.innerHTML = icon('shapes', { size: 18 });
-  els.compareBtn.innerHTML = `${icon('columns', { size: 16 })}<span>Bandingkan</span>`;
+  els.filtersClose.innerHTML = icon('x', { size: 18 });
+  els.filtersOpen.innerHTML = `${icon('sliders', { size: 16 })}<span>Filter</span>`;
 
   readStateFromUrl();
   renderExampleChips();
-  renderCategoryChips();
+  renderCategoryList();
   syncControls();
   bindEvents();
+  loadCategoryCounts();
 
   if (state.query) {
     els.input.value = state.query;
@@ -84,6 +97,9 @@ function readStateFromUrl() {
   const cat = p.get('cat');
   if (cat && CATEGORIES.includes(cat)) state.category = cat;
   state.compare = p.get('compare') === '1';
+  const min = Number(p.get('min'));
+  if (min > 0 && min <= 1) state.minScore = min;
+  if (SORTS.includes(p.get('sort'))) state.sort = p.get('sort');
 }
 
 function syncUrl() {
@@ -93,37 +109,77 @@ function syncUrl() {
   if (state.topK !== 10) p.set('k', String(state.topK));
   if (state.category !== 'Semua') p.set('cat', state.category);
   if (state.compare) p.set('compare', '1');
+  if (state.minScore > 0) p.set('min', state.minScore.toFixed(2));
+  if (state.sort !== 'relevance') p.set('sort', state.sort);
   const qs = p.toString();
   history.replaceState(null, '', `${location.pathname}${qs ? `?${qs}` : ''}${location.hash}`);
 }
 
 /* ---------- Render kontrol ---------- */
 function renderExampleChips() {
-  const chips = EXAMPLE_QUERIES.map((q) =>
+  els.exampleChips.innerHTML = EXAMPLE_QUERIES.map((q) =>
     `<button type="button" class="chip chip--example" data-query="${escapeHtml(q)}">${escapeHtml(q)}</button>`
   ).join('');
-  els.exampleChips.insertAdjacentHTML('beforeend', chips);
 }
 
-function renderCategoryChips() {
-  els.categoryChips.innerHTML = ['Semua', ...CATEGORIES].map((c) =>
-    `<button type="button" class="chip" data-category="${c}" aria-pressed="${c === state.category}">${c}</button>`
-  ).join('');
+function countFor(category) {
+  if (!categoryCounts) return '';
+  return category === 'Semua' ? categoryCounts.total : (categoryCounts.byCategory[category] || 0);
 }
+
+function renderCategoryList() {
+  els.categoryList.innerHTML = ['Semua', ...CATEGORIES].map((c) => `
+    <button type="button" class="cat-option" data-category="${c}" aria-pressed="${c === state.category}">
+      <span>${c}</span><span class="cat-option__count">${countFor(c)}</span>
+    </button>`).join('');
+}
+
+async function loadCategoryCounts() {
+  try {
+    const data = await api.getProducts();
+    const byCategory = {};
+    (data.products || []).forEach((p) => { byCategory[p.category] = (byCategory[p.category] || 0) + 1; });
+    categoryCounts = { total: data.total ?? (data.products || []).length, byCategory };
+    renderCategoryList();
+  } catch {
+    /* jumlah per kategori hanya pelengkap; abaikan jika gagal */
+  }
+}
+
+const filtersAreDefault = () => state.category === 'Semua' && state.minScore === 0 && state.sort === 'relevance';
 
 function syncControls() {
   els.modeGroup.querySelector(`input[value="${state.mode}"]`).checked = true;
   els.modeGroup.disabled = state.compare; // saat bandingkan, kedua mode dijalankan
+  els.compare.checked = state.compare;
   els.topK.value = String(state.topK);
-  els.compareBtn.setAttribute('aria-pressed', String(state.compare));
-  els.categoryChips.querySelectorAll('.chip').forEach((chip) => {
-    chip.setAttribute('aria-pressed', String(chip.dataset.category === state.category));
+  els.minScore.value = String(state.minScore);
+  els.minScoreValue.textContent = state.minScore.toFixed(2);
+  els.sort.value = state.sort;
+  els.categoryList.querySelectorAll('.cat-option').forEach((btn) => {
+    btn.setAttribute('aria-pressed', String(btn.dataset.category === state.category));
   });
-  els.resetCategoryBtn.disabled = state.category === 'Semua';
+  els.resetBtn.disabled = filtersAreDefault();
 }
 
 function toggleClearButton() {
   els.clearBtn.hidden = !els.input.value;
+}
+
+/* ---------- Drawer filter (tablet & mobile) ---------- */
+function openFilters() {
+  els.filters.classList.add('is-open');
+  els.backdrop.hidden = false;
+  els.filtersOpen.setAttribute('aria-expanded', 'true');
+  els.filtersClose.focus();
+}
+
+function closeFilters({ restoreFocus = true } = {}) {
+  if (!els.filters.classList.contains('is-open')) return;
+  els.filters.classList.remove('is-open');
+  els.backdrop.hidden = true;
+  els.filtersOpen.setAttribute('aria-expanded', 'false');
+  if (restoreFocus) els.filtersOpen.focus();
 }
 
 /* ---------- Event ---------- */
@@ -140,7 +196,6 @@ function bindEvents() {
     runSearch();
   });
 
-  // Ketik -> debounce
   els.input.addEventListener('input', () => {
     toggleClearButton();
     debouncedSearch();
@@ -155,20 +210,19 @@ function bindEvents() {
 
   els.clearBtn.addEventListener('click', clearQuery);
 
-  // Chip contoh kueri -> isi search bar + cari
   els.exampleChips.addEventListener('click', (e) => {
     const chip = e.target.closest('[data-query]');
     if (chip) fillAndSearch(chip.dataset.query);
   });
 
-  // FAB tongkat ajaib -> contoh kueri acak (berbeda dari kueri sekarang)
-  els.exampleBtn.addEventListener('click', () => {
-    const options = EXAMPLE_QUERIES.filter((q) => q !== els.input.value.trim());
-    fillAndSearch(options[Math.floor(Math.random() * options.length)]);
-  });
-
   els.modeGroup.addEventListener('change', (e) => {
     state.mode = e.target.value;
+    rerunIfQuery();
+  });
+
+  els.compare.addEventListener('change', () => {
+    state.compare = els.compare.checked;
+    syncControls();
     rerunIfQuery();
   });
 
@@ -177,19 +231,42 @@ function bindEvents() {
     rerunIfQuery();
   });
 
-  els.compareBtn.addEventListener('click', () => {
-    state.compare = !state.compare;
+  els.categoryList.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-category]');
+    if (btn) setCategory(btn.dataset.category);
+  });
+
+  // Skor minimum & urutan: cukup render ulang data terakhir
+  els.minScore.addEventListener('input', () => {
+    state.minScore = Number(els.minScore.value);
     syncControls();
-    rerunIfQuery();
+    syncUrl();
+    rerender();
   });
 
-  els.categoryChips.addEventListener('click', (e) => {
-    const chip = e.target.closest('[data-category]');
-    if (!chip) return;
-    setCategory(chip.dataset.category);
+  els.sort.addEventListener('change', () => {
+    state.sort = els.sort.value;
+    syncControls();
+    syncUrl();
+    rerender();
   });
 
-  els.resetCategoryBtn.addEventListener('click', () => setCategory('Semua'));
+  els.resetBtn.addEventListener('click', () => {
+    const categoryChanged = state.category !== 'Semua';
+    state.category = 'Semua';
+    state.minScore = 0;
+    state.sort = 'relevance';
+    syncControls();
+    if (categoryChanged && state.query) runSearch();
+    else { syncUrl(); rerender(); }
+  });
+
+  els.filtersOpen.addEventListener('click', openFilters);
+  els.filtersClose.addEventListener('click', () => closeFilters());
+  els.backdrop.addEventListener('click', () => closeFilters());
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeFilters();
+  });
 
   // Tombol aksi di dalam state block (coba lagi, hapus filter, dll.)
   els.results.addEventListener('click', (e) => {
@@ -198,12 +275,12 @@ function bindEvents() {
     const action = btn.dataset.action;
     if (action === 'retry') runSearch();
     if (action === 'reset-category') setCategory('Semua');
+    if (action === 'reset-min') { state.minScore = 0; syncControls(); syncUrl(); rerender(); }
     if (action === 'use-semantic') { state.mode = 'semantic'; syncControls(); runSearch(); }
-    if (action === 'example') fillAndSearch(EXAMPLE_QUERIES[0]);
     if (action === 'focus') els.input.focus();
+    if (action.startsWith('example:')) fillAndSearch(EXAMPLE_QUERIES[Number(action.split(':')[1])]);
   });
 
-  // Ikon "Search" di navigasi pill -> fokus ke search bar
   window.addEventListener('hashchange', () => {
     if (location.hash === '#cari') {
       setActiveNav('search');
@@ -232,6 +309,7 @@ function clearQuery() {
 function setCategory(category) {
   state.category = category;
   syncControls();
+  closeFilters({ restoreFocus: false });
   if (state.query) runSearch();
   else { syncUrl(); renderEmpty(); }
 }
@@ -241,10 +319,21 @@ function rerunIfQuery() {
   else syncUrl();
 }
 
+/** Render ulang tanpa request baru (dipakai saat urutan / skor minimum berubah). */
+function rerender() {
+  if (!lastView) {
+    if (!state.query) renderEmpty();
+    return;
+  }
+  if (lastView.kind === 'results') renderResults(lastView.query, lastView.data);
+  else renderCompare(lastView.query, lastView.semantic, lastView.bm25);
+}
+
 /* ---------- Pencarian ---------- */
 async function runSearch() {
   const query = els.input.value.trim();
   state.query = query;
+  lastView = null;
   syncUrl();
 
   if (!query) {
@@ -282,69 +371,73 @@ async function runSearch() {
   }
 }
 
+/* ---------- Filter & urutan di sisi klien ---------- */
+// Peringkat asli (berdasarkan relevansi) disimpan dulu, supaya tetap benar setelah diurutkan ulang
+function applyView(results) {
+  const ranked = results.map((r, i) => ({ ...r, rank: i + 1 }));
+  const shown = ranked.filter((r) => typeof r.score !== 'number' || r.score >= state.minScore);
+  return sortItems(shown);
+}
+
+function sortItems(items) {
+  if (state.sort === 'price-asc') return [...items].sort((a, b) => a.price - b.price);
+  if (state.sort === 'price-desc') return [...items].sort((a, b) => b.price - a.price);
+  return items;
+}
+
 /* ---------- Render state ---------- */
 function setInfo(html) {
-  els.info.hidden = !html;
   els.info.innerHTML = html || '';
 }
 
 const sep = '<span class="sep" aria-hidden="true">·</span>';
+const seconds = (ms) => (ms == null ? '' : `${sep}<span>${(ms / 1000).toFixed(3)} detik</span>`);
 
-function categoryInfo() {
-  return state.category !== 'Semua' ? `${sep}<span>kategori ${escapeHtml(state.category)}</span>` : '';
+function exampleActions() {
+  return EXAMPLE_QUERIES.slice(0, 3).map((q, i) => ({ label: q, action: `example:${i}`, variant: 'chip' }));
 }
 
 // State kosong (sebelum mencari) + katalog sebagai inspirasi
 async function renderEmpty() {
   const seq = ++requestSeq;
-  setInfo('');
+  lastView = null;
   els.results.setAttribute('aria-busy', 'false');
 
   const label = state.category === 'Semua' ? 'Semua produk' : state.category;
-  els.results.innerHTML = `
-    ${stateBlock({
-      iconName: 'sparkles',
-      title: 'Mulai dengan menuliskan kebutuhan kulitmu',
-      text: 'Sebutkan jenis produk, jenis kulit, atau keluhanmu dalam bahasa sehari-hari. Contoh: "pelembap ringan untuk cuaca panas".',
-      actions: [
-        { label: 'Coba contoh kueri', action: 'example', variant: 'inverted', icon: 'wand' },
-        { label: 'Ketik kueri', action: 'focus', variant: 'secondary', icon: 'pencil' },
-      ],
-    })}
-    <section class="catalog" aria-labelledby="catalog-title">
-      <div class="catalog__head">
-        <div>
-          <span class="eyebrow">Jelajahi katalog</span>
-          <h3 class="section-title" id="catalog-title">${escapeHtml(label)}</h3>
-        </div>
-        <span class="meta-chip" id="catalog-meta"></span>
-      </div>
-      <div class="results-grid" id="catalog-grid">${skeletonCards(3)}</div>
-    </section>`;
+  setInfo(`<span>Belum ada kueri. Menampilkan katalog: <strong>${escapeHtml(label)}</strong></span>`);
+  els.results.innerHTML = `<div class="results-grid" id="catalog-grid">${skeletonCards(3)}</div>`;
 
   try {
     const data = await api.getProducts(state.category === 'Semua' ? '' : state.category);
     if (seq !== requestSeq) return;
-    const grid = document.getElementById('catalog-grid');
-    document.getElementById('catalog-meta').textContent = `${data.total} produk · ${data.latency_ms} ms`;
-    grid.innerHTML = data.products.length
-      ? data.products.slice(0, 6).map((p) => productCard(p)).join('')
-      : '<p class="state__text">Belum ada produk di katalog. Isi file data/products.json dengan dataset kamu.</p>';
+    const products = sortItems(data.products || []);
+    setInfo(`<span>Belum ada kueri. Menampilkan katalog: <strong>${escapeHtml(label)}</strong> (${data.total} produk)</span>`);
+    els.results.innerHTML = products.length
+      ? `<div class="results-grid">${products.slice(0, 9).map((p) => productCard(p)).join('')}</div>`
+      : stateBlock({
+          illustration: 'empty',
+          title: 'Katalog masih kosong',
+          text: 'Isi file data/products.json dengan dataset kamu, lalu muat ulang halaman ini.',
+        });
   } catch {
     if (seq !== requestSeq) return;
-    const grid = document.getElementById('catalog-grid');
-    if (grid) grid.outerHTML = '<p class="state__text">Katalog belum bisa dimuat.</p>';
+    els.results.innerHTML = stateBlock({
+      illustration: 'error',
+      tone: 'danger',
+      title: 'Katalog belum bisa dimuat',
+      text: 'Pastikan server sudah berjalan, lalu coba lagi.',
+    });
   }
 }
 
 function renderLoading() {
   els.results.setAttribute('aria-busy', 'true');
-  setInfo(`<span>Mencari produk yang paling relevan…</span>`);
+  setInfo('<span>Memahami pencarianmu…</span>');
   const n = Math.min(state.topK, 6);
   if (state.compare) {
     const col = (mode) => `
-      <section class="compare-col compare-col--${mode}">
-        <div class="compare-col__head"><span class="compare-col__title"><span class="compare-col__dot"></span>${MODE_LABEL[mode]}</span></div>
+      <section class="compare-col">
+        <div class="compare-col__head"><span class="compare-col__title">${MODE_LABEL[mode]}</span></div>
         <div class="compare-list">${skeletonCards(2)}</div>
       </section>`;
     els.results.innerHTML = `<div class="compare-grid">${col('semantic')}${col('bm25')}</div>`;
@@ -353,79 +446,96 @@ function renderLoading() {
   }
 }
 
+function hiddenNote(total, shown) {
+  const hidden = total - shown;
+  return hidden > 0 ? `${sep}<span>${hidden} disembunyikan (skor &lt; ${state.minScore.toFixed(2)})</span>` : '';
+}
+
+function belowMinState(compact = false) {
+  return stateBlock({
+    illustration: 'empty',
+    compact,
+    title: 'Semua hasil di bawah skor minimum',
+    text: `Tidak ada produk dengan skor relevansi ${state.minScore.toFixed(2)} ke atas.`,
+    actions: [{ label: 'Kembalikan skor minimum ke 0', action: 'reset-min', variant: 'secondary' }],
+  });
+}
+
 function renderResults(query, data) {
-  const results = data.results || [];
-  if (!results.length) {
+  lastView = { kind: 'results', query, data };
+  const all = data.results || [];
+  if (!all.length) {
     renderNoResults(query, data);
     return;
   }
 
-  const extra = data.total > results.length ? ` dari ${data.total} kandidat` : '';
+  const shown = applyView(all);
   setInfo(`
-    <span><strong>${results.length} hasil</strong>${extra} untuk “${escapeHtml(query)}”</span>
-    ${sep}<span>${data.latency_ms} ms</span>
-    ${sep}<span>mode ${MODE_LABEL[state.mode]}</span>
-    ${categoryInfo()}`);
+    <span>Menampilkan <strong>${shown.length} hasil</strong> untuk <strong>“${escapeHtml(query)}”</strong></span>
+    ${seconds(data.latency_ms)}
+    ${hiddenNote(all.length, shown.length)}`);
 
-  els.results.innerHTML = `<div class="results-grid">
-    ${results.map((r, i) => productCard(r, { mode: state.mode, rank: i + 1, query })).join('')}
-  </div>`;
+  els.results.innerHTML = shown.length
+    ? `<div class="results-grid">${shown.map((r) => productCard(r, { mode: state.mode, rank: r.rank, query })).join('')}</div>`
+    : belowMinState();
 }
 
 function renderNoResults(query, data) {
-  setInfo(`<span><strong>0 hasil</strong> untuk “${escapeHtml(query)}”</span>${sep}<span>${data.latency_ms} ms</span>${sep}<span>mode ${MODE_LABEL[state.mode]}</span>${categoryInfo()}`);
+  setInfo(`<span><strong>0 hasil</strong> untuk <strong>“${escapeHtml(query)}”</strong></span>${seconds(data.latency_ms)}`);
 
   const actions = [];
-  if (state.category !== 'Semua') actions.push({ label: 'Hapus filter kategori', action: 'reset-category', variant: 'secondary', icon: 'shapes' });
-  if (state.mode === 'bm25') actions.push({ label: 'Coba mode Semantic', action: 'use-semantic', variant: 'primary', icon: 'sparkles' });
-  actions.push({ label: 'Ubah kueri', action: 'focus', variant: 'outlined', icon: 'pencil' });
+  if (state.category !== 'Semua') actions.push({ label: 'Hapus filter kategori', action: 'reset-category', variant: 'secondary' });
+  if (state.mode === 'bm25') actions.push({ label: 'Coba pencarian semantik', action: 'use-semantic', variant: 'primary' });
 
   els.results.innerHTML = stateBlock({
-    iconName: 'searchX',
-    tone: 'muted',
-    title: 'Tidak ada produk yang cocok',
+    illustration: 'empty',
+    title: 'Belum ada produk yang cocok',
     text: state.mode === 'bm25'
-      ? 'Keyword search hanya menemukan produk yang memuat kata yang sama persis. Coba mode Semantic atau gunakan kata lain.'
-      : 'Coba gunakan kata yang lebih umum, sebutkan jenis kulit, atau hapus filter kategori.',
-    actions,
+      ? 'Pencarian kata kunci hanya menemukan produk yang memuat kata yang sama persis. Coba pencarian semantik atau pakai kata lain.'
+      : 'Coba gunakan kata lain atau kurangi filter. Atau mulai dari salah satu contoh ini:',
+    actions: actions.length ? actions : exampleActions(),
   });
 }
 
 function renderError(err) {
   setInfo('');
   els.results.innerHTML = stateBlock({
-    iconName: 'alert',
+    illustration: 'error',
     tone: 'danger',
     title: 'Pencarian gagal dimuat',
     text: err && err.message ? err.message : 'Terjadi kesalahan yang tidak diketahui.',
-    actions: [{ label: 'Coba lagi', action: 'retry', variant: 'inverted', icon: 'refresh' }],
+    actions: [{ label: 'Coba lagi', action: 'retry', variant: 'primary' }],
   });
 }
 
-// Mode bandingkan: dua kolom Semantic vs BM25
+// Mode bandingkan: dua kolom Semantik vs Kata kunci
 function renderCompare(query, semantic, bm25) {
+  lastView = { kind: 'compare', query, semantic, bm25 };
   setInfo(`
-    <span><strong>Mode bandingkan</strong> untuk “${escapeHtml(query)}”</span>
-    ${sep}<span>Semantic ${semantic.latency_ms} ms</span>
-    ${sep}<span>BM25 ${bm25.latency_ms} ms</span>
-    ${categoryInfo()}`);
+    <span>Membandingkan dua metode untuk <strong>“${escapeHtml(query)}”</strong></span>
+    ${sep}<span>Semantik ${(semantic.latency_ms / 1000).toFixed(3)} dtk</span>
+    ${sep}<span>Kata kunci ${(bm25.latency_ms / 1000).toFixed(3)} dtk</span>`);
 
   const column = (mode, data) => {
-    const results = data.results || [];
-    const body = results.length
-      ? `<div class="compare-list">${results.map((r, i) => productCard(r, { mode, rank: i + 1, compact: true, query })).join('')}</div>`
-      : stateBlock({
-          iconName: 'searchX',
-          tone: 'muted',
-          compact: true,
-          title: 'Tidak ada hasil',
-          text: mode === 'bm25' ? 'Tidak ada produk yang memuat kata kueri secara persis.' : 'Tidak ada produk yang cukup mirip secara makna.',
-        });
+    const all = data.results || [];
+    const shown = applyView(all);
+    let body;
+    if (!all.length) {
+      body = stateBlock({
+        compact: true,
+        title: 'Tidak ada hasil',
+        text: mode === 'bm25' ? 'Tidak ada produk yang memuat kata kueri secara persis.' : 'Tidak ada produk yang cukup mirip secara makna.',
+      });
+    } else if (!shown.length) {
+      body = belowMinState(true);
+    } else {
+      body = `<div class="compare-list">${shown.map((r) => productCard(r, { mode, rank: r.rank, compact: true, query })).join('')}</div>`;
+    }
     return `
-      <section class="compare-col compare-col--${mode}" aria-label="Hasil ${MODE_LABEL[mode]}">
+      <section class="compare-col" aria-label="Hasil ${MODE_LABEL[mode]}">
         <div class="compare-col__head">
-          <h3 class="compare-col__title"><span class="compare-col__dot" aria-hidden="true"></span>${MODE_LABEL[mode]}</h3>
-          <span class="meta-chip">${results.length} hasil · ${data.latency_ms} ms</span>
+          <h3 class="compare-col__title">${MODE_LABEL[mode]}</h3>
+          <span class="meta-chip">${shown.length} hasil</span>
         </div>
         ${body}
       </section>`;
