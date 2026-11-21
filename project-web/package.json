@@ -1,17 +1,26 @@
 {
   "name": "skincare-semantic-search-qa",
-  "version": "0.1.0",
-  "description": "Prototipe UI Semantic Search & Question Answering produk skincare (data dummy).",
-  "main": "server.js",
+  "version": "0.2.0",
+  "description": "Prototipe UI Semantic Search & Question Answering produk skincare (Next.js, data dummy).",
   "private": true,
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "dependencies": {
-    "express": "^4.21.2"
+    "next": "^16.4.6",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "server-only": "^0.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "typescript": "^7.0.2"
   }
 }

@@ -1,36 +1,34 @@
 /**
- * server.js
- * Server Express untuk prototipe UI:
- *  - menyajikan file statis di folder /public
- *  - menyediakan API dummy di /api/* (nanti diganti backend model asli, mis. FastAPI/Flask)
+ * lib/engine.ts
+ * Logika API dummy (dulu di server.js / Express), dipakai oleh Route Handlers di app/api/*.
+ * Nanti diganti backend model asli (mis. FastAPI/Flask) — cukup set NEXT_PUBLIC_API_BASE_URL.
  *
  * Semua "skor" di sini hanyalah simulasi berbasis kecocokan kata + sedikit acak,
  * BUKAN embedding / model sungguhan. Tujuannya hanya agar UI terlihat realistis.
  */
-const express = require('express');
-const path = require('path');
+import 'server-only';
+import { NextResponse, type NextRequest } from 'next/server';
+import productsJson from '@/data/products.json';
+import reviewsJson from '@/data/reviews.json';
+import type {
+  AskBody, Evidence, Product, ProductBody, ProductsBody, Retriever, Review, SearchBody, SearchMode, SearchResult,
+} from './types';
 
-const products = require('./data/products.json');
-const reviews = require('./data/reviews.json');
-
-const app = express();
-const PORT = process.env.PORT || 3000;
-
-app.use(express.json({ limit: '100kb' }));
-app.use(express.static(path.join(__dirname, 'public')));
+const products = productsJson as unknown as Product[];
+const reviews = reviewsJson as unknown as Record<string, Review[]>;
 
 /* =========================================================
  * Utilitas umum
  * ========================================================= */
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 // Delay acak 150–400 ms supaya loading state di UI terlihat
 const randomDelay = () => 150 + Math.floor(Math.random() * 251);
-const round = (n, d = 3) => Math.round(n * 10 ** d) / 10 ** d;
-const clamp = (n, min, max) => Math.min(max, Math.max(min, n));
+const round = (n: number, d = 3) => Math.round(n * 10 ** d) / 10 ** d;
+const clamp = (n: number, min: number, max: number) => Math.min(max, Math.max(min, n));
 
 // "Acak" tapi konsisten untuk input yang sama (hash FNV-1a -> 0..1)
-function seededRandom(str) {
+function seededRandom(str: string): number {
   let h = 2166136261;
   for (let i = 0; i < str.length; i++) {
     h ^= str.charCodeAt(i);
@@ -39,15 +37,17 @@ function seededRandom(str) {
   return ((h >>> 0) % 10000) / 10000;
 }
 
-class HttpError extends Error {
-  constructor(status, message) {
+export class HttpError extends Error {
+  status: number;
+
+  constructor(status: number, message: string) {
     super(message);
     this.status = status;
   }
 }
 
 // Normalisasi teks: huruf kecil, buang tanda baca, rapikan spasi
-function normalize(text) {
+function normalize(text: unknown): string {
   return String(text || '')
     .toLowerCase()
     .normalize('NFD')
@@ -65,16 +65,22 @@ const SEARCH_STOPWORDS = new Set([
   'and', 'of', 'to', 'with', 'my', 'is', 'dalam', 'jadi', 'tapi', 'karena', 'akan',
 ]);
 
-function tokenize(text, stopwords = SEARCH_STOPWORDS) {
+function tokenize(text: unknown, stopwords: Set<string> = SEARCH_STOPWORDS): string[] {
   return normalize(text)
     .split(' ')
     .filter((t) => t.length > 1 && !stopwords.has(t));
 }
 
+interface Sentence {
+  text: string;
+  start: number;
+  end: number;
+}
+
 // Pecah teks jadi kalimat beserta offset karakter aslinya.
 // Titik dianggap akhir kalimat hanya jika diikuti spasi/akhir teks (supaya "0.5%" aman).
-function splitSentences(text) {
-  const out = [];
+function splitSentences(text: string): Sentence[] {
+  const out: Sentence[] = [];
   let start = 0;
   for (let i = 0; i < text.length; i++) {
     const ch = text[i];
@@ -90,23 +96,38 @@ function splitSentences(text) {
   return out;
 }
 
-// Pembungkus endpoint: delay acak + latency_ms + penanganan error seragam
-function endpoint(handler) {
-  return async (req, res) => {
+type RouteParams = Record<string, string | string[] | undefined>;
+type Handler<T> = (request: NextRequest, params: RouteParams) => T | Promise<T>;
+
+/**
+ * Pembungkus Route Handler: delay acak + latency_ms + penanganan error seragam.
+ * handler menerima (request, params) dan mengembalikan objek JSON.
+ */
+export function endpoint<T extends object>(handler: Handler<T>) {
+  return async (request: NextRequest, context: { params: Promise<RouteParams> }) => {
     const t0 = Date.now();
     try {
       await sleep(randomDelay());
-      const body = await handler(req);
-      res.json({ ...body, latency_ms: Date.now() - t0 });
+      const params = context?.params ? await context.params : {};
+      const body = await handler(request, params);
+      return NextResponse.json({ ...body, latency_ms: Date.now() - t0 });
     } catch (err) {
-      const status = err.status || 500;
+      const status = err instanceof HttpError ? err.status : 500;
       if (status === 500) console.error(err);
-      res.status(status).json({
-        error: err.message || 'Terjadi kesalahan pada server.',
-        latency_ms: Date.now() - t0,
-      });
+      const message = err instanceof Error && err.message ? err.message : 'Terjadi kesalahan pada server.';
+      return NextResponse.json({ error: message, latency_ms: Date.now() - t0 }, { status });
     }
   };
+}
+
+/** Baca body JSON; body kosong / tidak valid dianggap objek kosong. */
+export async function readJson(request: NextRequest): Promise<Record<string, unknown>> {
+  try {
+    const body = await request.json();
+    return body && typeof body === 'object' ? body : {};
+  } catch {
+    return {};
+  }
 }
 
 /* =========================================================
@@ -115,10 +136,10 @@ function endpoint(handler) {
 
 const CATEGORY_IDS = new Set(['cleanser', 'toner', 'serum', 'moisturizer', 'sunscreen', 'exfoliator']);
 
-const reviewCount = (id) => (reviews[id] || []).length;
-const toPublicProduct = (p) => ({ ...p, review_count: reviewCount(p.id) });
+const reviewCount = (id: string) => (reviews[id] || []).length;
+const toPublicProduct = (p: Product): Product => ({ ...p, review_count: reviewCount(p.id) });
 
-function parseCategory(category) {
+function parseCategory(category: unknown): string {
   const c = String(category || '').trim().toLowerCase();
   if (!c || c === 'semua' || c === 'all') return '';
   if (!CATEGORY_IDS.has(c)) throw new HttpError(400, `Kategori "${category}" tidak dikenal.`);
@@ -131,7 +152,7 @@ function parseCategory(category) {
  * (Nanti diganti custom embedding + cosine similarity.)
  * ========================================================= */
 
-const CONCEPTS = {
+const CONCEPTS: Record<string, string[]> = {
   cleanser: ['sabun cuci muka', 'sabun muka', 'cuci muka', 'pembersih wajah', 'pembersih', 'facial wash', 'face wash', 'cleanser', 'foam', 'busa', 'sabun'],
   toner: ['toner', 'penyegar'],
   serum: ['serum', 'essence', 'ampoule'],
@@ -155,10 +176,10 @@ const CONCEPTS = {
 };
 
 // Deteksi konsep + token yang sudah "tertutup" frasa konsep
-function detectConcepts(normText) {
+function detectConcepts(normText: string) {
   const padded = ` ${normText} `;
-  const concepts = new Set();
-  const covered = new Set();
+  const concepts = new Set<string>();
+  const covered = new Set<string>();
   for (const [id, phrases] of Object.entries(CONCEPTS)) {
     for (const ph of phrases) {
       if (padded.includes(` ${ph} `)) {
@@ -170,15 +191,33 @@ function detectConcepts(normText) {
   return { concepts, covered };
 }
 
-// Indeks produk dibuat sekali saat server start
-const productIndex = products.map((p) => {
+interface IndexedDoc {
+  product: Product;
+  id: string;
+  category: string;
+  padded: string;
+  concepts: Set<string>;
+  tf: Record<string, number>;
+  len: number;
+  chunks: string[];
+}
+
+interface Scored {
+  doc: IndexedDoc;
+  score: number;
+  raw?: number;
+  terms: string[];
+}
+
+// Indeks produk dibuat sekali saat modul dimuat
+const productIndex: IndexedDoc[] = products.map((p) => {
   const fullText = [p.name, p.brand, p.category, p.description, (p.tags || []).join('. ')].join('. ');
   const norm = normalize(fullText);
   const { concepts } = detectConcepts(norm);
   const category = String(p.category || '').toLowerCase();
   concepts.add(category);
   const tokens = tokenize(fullText);
-  const tf = {};
+  const tf: Record<string, number> = {};
   tokens.forEach((t) => { tf[t] = (tf[t] || 0) + 1; });
   return {
     product: p,
@@ -199,20 +238,20 @@ if (!products.length) {
 // Statistik korpus untuk BM25 (aman saat data masih kosong)
 const N_DOCS = productIndex.length;
 const AVG_DL = N_DOCS ? productIndex.reduce((s, d) => s + d.len, 0) / N_DOCS || 1 : 1;
-const DF = {};
+const DF: Record<string, number> = {};
 productIndex.forEach((d) => Object.keys(d.tf).forEach((t) => { DF[t] = (DF[t] || 0) + 1; }));
 
-function semanticSearch(query, candidates) {
+function semanticSearch(query: string, candidates: IndexedDoc[]): Scored[] {
   const qNorm = normalize(query);
   const { concepts: qConcepts, covered } = detectConcepts(qNorm);
   const leftover = [...new Set(tokenize(query).filter((t) => !covered.has(t)))];
   const qCats = [...qConcepts].filter((c) => CATEGORY_IDS.has(c));
-  const out = [];
+  const out: Scored[] = [];
 
   for (const doc of candidates) {
     let total = 0;
     let hit = 0;
-    const terms = [];
+    const terms: string[] = [];
 
     for (const c of qConcepts) {
       const w = CATEGORY_IDS.has(c) ? 2 : 1; // konsep kategori lebih berbobot
@@ -237,15 +276,15 @@ function semanticSearch(query, candidates) {
   return out;
 }
 
-function bm25Search(query, candidates) {
+function bm25Search(query: string, candidates: IndexedDoc[]): Scored[] {
   const qTokens = [...new Set(tokenize(query))];
   const k1 = 1.5;
   const b = 0.75;
-  const out = [];
+  const out: Scored[] = [];
 
   for (const doc of candidates) {
     let raw = 0;
-    const terms = [];
+    const terms: string[] = [];
     for (const t of qTokens) {
       const tf = doc.tf[t];
       if (!tf) continue;
@@ -262,7 +301,7 @@ function bm25Search(query, candidates) {
 }
 
 // Pilih potongan teks (chunk) yang paling banyak memuat kata yang cocok
-function bestChunk(doc, terms) {
+function bestChunk(doc: IndexedDoc, terms: string[]): string {
   let best = doc.chunks[0] || '';
   let bestCount = -1;
   for (const chunk of doc.chunks) {
@@ -288,7 +327,7 @@ const QA_STOPWORDS = new Set([
 ]);
 
 // Grup sinonim: dipakai retriever "pretrained" & "domain" (BM25 tidak memakai ekspansi)
-const QA_SYNONYMS = [
+const QA_SYNONYMS: string[][] = [
   ['greasy', 'oily', 'grease', 'sticky', 'tacky', 'heavy', 'slick', 'shiny'],
   ['smell', 'scent', 'unscented', 'fragrance', 'odor', 'perfume', 'scented'],
   ['sensitive', 'irritation', 'irritate', 'irritated', 'redness', 'sting', 'stinging', 'gentle', 'react'],
@@ -306,15 +345,20 @@ const QA_SYNONYMS = [
   ['eye', 'eyes'],
 ];
 
-const RETRIEVER_BONUS = { bm25: 0, pretrained: 0.03, domain: 0.06 };
+const RETRIEVER_BONUS: Record<Retriever, number> = { bm25: 0, pretrained: 0.03, domain: 0.06 };
+
+interface WordGroup {
+  key: string;
+  words: string[];
+}
 
 // Stemming sangat sederhana: "smells" -> "smell"
-const stem = (t) => (t.length > 4 && t.endsWith('s') && !t.endsWith('ss') ? t.slice(0, -1) : t);
+const stem = (t: string) => (t.length > 4 && t.endsWith('s') && !t.endsWith('ss') ? t.slice(0, -1) : t);
 
-function expandQuestion(question, retriever) {
+function expandQuestion(question: string, retriever: Retriever): WordGroup[] {
   const tokens = normalize(question).split(' ').filter((t) => t.length > 1 && !QA_STOPWORDS.has(t));
-  const groups = [];
-  const seen = new Set();
+  const groups: WordGroup[] = [];
+  const seen = new Set<string>();
   for (const raw of tokens) {
     const t = stem(raw);
     if (retriever === 'bm25') {
@@ -330,13 +374,15 @@ function expandQuestion(question, retriever) {
   return groups;
 }
 
-const wordRegex = (w) => new RegExp(`\\b${w.replace(/ /g, '\\s+')}`, 'i');
-const groupMatches = (group, text) => group.words.some((w) => wordRegex(w).test(text));
+const wordRegex = (w: string) => new RegExp(`\\b${w.replace(/ /g, '\\s+')}`, 'i');
+const groupMatches = (group: WordGroup, text: string) => group.words.some((w) => wordRegex(w).test(text));
 
-function scoreReview(review, groups) {
+type BestSentence = Sentence & { coverage: number };
+
+function scoreReview(review: Review, groups: WordGroup[]): { coverage: number; best: BestSentence | null } {
   if (!groups.length) return { coverage: 0, best: null };
   const matched = groups.filter((g) => groupMatches(g, review.text)).length;
-  let best = null;
+  let best: BestSentence | null = null;
   let bestCov = 0;
   for (const s of splitSentences(review.text)) {
     const cov = groups.filter((g) => groupMatches(g, s.text)).length / groups.length;
@@ -346,32 +392,32 @@ function scoreReview(review, groups) {
 }
 
 /* =========================================================
- * Endpoint API
+ * Operasi API (dipanggil oleh app/api/*)
  * ========================================================= */
 
-// GET /api/products?category=
-app.get('/api/products', endpoint(async (req) => {
-  const cat = parseCategory(req.query.category);
+/** GET /api/products?category= */
+export function listProducts(category: string | null): ProductsBody {
+  const cat = parseCategory(category);
   const list = products.filter((p) => !cat || p.category.toLowerCase() === cat).map(toPublicProduct);
   return { total: list.length, products: list };
-}));
+}
 
-// GET /api/products/:id
-app.get('/api/products/:id', endpoint(async (req) => {
-  const p = products.find((x) => x.id === req.params.id);
+/** GET /api/products/:id */
+export function getProduct(id: unknown): ProductBody {
+  const p = products.find((x) => x.id === id);
   if (!p) throw new HttpError(404, 'Produk tidak ditemukan.');
   return { product: toPublicProduct(p) };
-}));
+}
 
-// POST /api/search  { query, mode, topK, category }
-app.post('/api/search', endpoint(async (req) => {
-  const { query = '', mode = 'semantic', topK = 10, category = '' } = req.body || {};
+/** POST /api/search  { query, mode, topK, category } */
+export function search(body: Record<string, unknown> = {}): SearchBody {
+  const { query = '', mode = 'semantic', topK = 10, category = '' } = body;
   const q = String(query).trim();
 
   if (!q) throw new HttpError(400, 'Kueri tidak boleh kosong.');
   if (q.length > 300) throw new HttpError(400, 'Kueri terlalu panjang (maks. 300 karakter).');
   if (q.toLowerCase() === '__error__') throw new HttpError(500, 'Simulasi error server (kueri "__error__").');
-  if (!['semantic', 'bm25'].includes(mode)) throw new HttpError(400, 'Mode harus "semantic" atau "bm25".');
+  if (mode !== 'semantic' && mode !== 'bm25') throw new HttpError(400, 'Mode harus "semantic" atau "bm25".');
 
   const k = [5, 10, 20].includes(Number(topK)) ? Number(topK) : 10;
   const cat = parseCategory(category);
@@ -380,7 +426,7 @@ app.post('/api/search', endpoint(async (req) => {
   const scored = mode === 'semantic' ? semanticSearch(q, candidates) : bm25Search(q, candidates);
   scored.sort((a, b) => b.score - a.score);
 
-  const results = scored.slice(0, k).map(({ doc, score, raw, terms }) => {
+  const results: SearchResult[] = scored.slice(0, k).map(({ doc, score, raw, terms }) => {
     const p = doc.product;
     const uniqueTerms = [...new Set(terms)];
     return {
@@ -397,19 +443,19 @@ app.post('/api/search', endpoint(async (req) => {
     };
   });
 
-  return { query: q, mode, topK: k, category: cat || 'semua', total: scored.length, results };
-}));
+  return { query: q, mode: mode as SearchMode, topK: k, category: cat || 'semua', total: scored.length, results };
+}
 
-// POST /api/ask  { productId, question, retriever, k }
-app.post('/api/ask', endpoint(async (req) => {
-  const { productId, question = '', retriever = 'domain', k = 3 } = req.body || {};
+/** POST /api/ask  { productId, question, retriever, k } */
+export function ask(body: Record<string, unknown> = {}): AskBody {
+  const { productId, question = '', retriever = 'domain', k = 3 } = body;
   const product = products.find((p) => p.id === productId);
   const q = String(question).trim();
 
   if (!product) throw new HttpError(404, 'Produk tidak ditemukan.');
   if (q.length < 3) throw new HttpError(400, 'Pertanyaan terlalu pendek.');
   if (q.length > 300) throw new HttpError(400, 'Pertanyaan terlalu panjang (maks. 300 karakter).');
-  if (!['bm25', 'pretrained', 'domain'].includes(retriever)) {
+  if (retriever !== 'bm25' && retriever !== 'pretrained' && retriever !== 'domain') {
     throw new HttpError(400, 'Retriever harus "bm25", "pretrained", atau "domain".');
   }
   const topK = [1, 3, 5].includes(Number(k)) ? Number(k) : 3;
@@ -429,9 +475,10 @@ app.post('/api/ask', endpoint(async (req) => {
 
   const top = scored[0];
   // Bisa dijawab jika ada kalimat ulasan yang mencakup >= 50% kata kunci pertanyaan
-  const answerable = Boolean(top && top.best && top.best.coverage >= 0.5);
+  const topBest = top && top.best && top.best.coverage >= 0.5 ? top.best : null;
+  const answerable = topBest !== null;
 
-  const evidence = scored.slice(0, topK).map((s) => {
+  const evidence: Evidence[] = scored.slice(0, topK).map((s) => {
     let score = s.coverage > 0
       ? 0.5 + 0.38 * s.coverage + bonus + s.noise * 0.05
       : 0.08 + s.noise * 0.22;
@@ -453,20 +500,11 @@ app.post('/api/ask', endpoint(async (req) => {
     retriever,
     k: topK,
     answerable,
-    answer: answerable ? top.best.text : null,
-    confidence: answerable
-      ? round(clamp(0.5 + 0.33 * top.best.coverage + bonus + top.noise * 0.06, 0, 0.97))
+    answer: topBest ? topBest.text : null,
+    confidence: topBest
+      ? round(clamp(0.5 + 0.33 * topBest.coverage + bonus + top.noise * 0.06, 0, 0.97))
       : round(0.08 + (top ? top.noise : 0) * 0.2),
     message: answerable ? null : 'Informasi tidak ditemukan dalam ulasan yang tersedia.',
     evidence,
   };
-}));
-
-// Endpoint /api lain yang tidak dikenal
-app.use('/api', (req, res) => {
-  res.status(404).json({ error: 'Endpoint tidak ditemukan.' });
-});
-
-app.listen(PORT, () => {
-  console.log(`Server berjalan di http://localhost:${PORT}`);
-});
+}
